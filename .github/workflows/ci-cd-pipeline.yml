@@ -146,40 +146,10 @@ jobs:
       - name: Load Docker image
         run: docker load -i /tmp/serviciudad.tar
 
-      - name: Setup Canary environment
-        run: |
-          mkdir -p deployment
-          # Crear docker-compose para canary
-          cat > deployment/docker-compose.canary.yml << 'DOCKERCOMPOSE'
-          version: '3.8'
-          services:
-            app-stable:
-              image: serviciudad:stable
-              container_name: serviciudad-stable
-              ports:
-                - "8080:8080"
-              environment:
-                - SPRING_PROFILES_ACTIVE=production
-                - SPRING_DATASOURCE_URL=$DB_URL
-                - SPRING_DATASOURCE_USERNAME=$DB_USERNAME
-                - SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD
-
-            app-canary:
-              image: serviciudad:latest
-              container_name: serviciudad-canary
-              ports:
-                - "8081:8080"
-              environment:
-                - SPRING_PROFILES_ACTIVE=production
-                - SPRING_DATASOURCE_URL=$DB_URL
-                - SPRING_DATASOURCE_USERNAME=$DB_USERNAME
-                - SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD
-          DOCKERCOMPOSE
-
       - name: Initialize stable tag if missing
         run: |
           # Verificar si existe la tag stable, si no crearla
-          if ! docker images | grep -q "serviciudad.*stable"; then
+          if ! docker inspect serviciudad:stable >/dev/null 2>&1; then
             echo "🔄 Creando tag stable inicial..."
             docker tag serviciudad:latest serviciudad:stable
           else
@@ -192,14 +162,35 @@ jobs:
           DB_USERNAME: ${{ secrets.DB_SERVICIUDAD_USERNAME }}
           DB_PASSWORD: ${{ secrets.DB_SERVICIUDAD_PASSWORD }}
         run: |
-          cd deployment
           echo "🚀 Desplegando versión Canary..."
           
           # Detener contenedores existentes
-          docker-compose -f docker-compose.canary.yml down || true
+          docker stop serviciudad-stable || true
+          docker stop serviciudad-canary || true
+          docker rm serviciudad-stable || true
+          docker rm serviciudad-canary || true
           
-          # Iniciar ambas versiones
-          docker-compose -f docker-compose.canary.yml up -d
+          # Iniciar versión Stable
+          echo "🔧 Iniciando Stable..."
+          docker run -d \
+            --name serviciudad-stable \
+            -p 8080:8080 \
+            -e SPRING_PROFILES_ACTIVE=production \
+            -e SPRING_DATASOURCE_URL=$DB_URL \
+            -e SPRING_DATASOURCE_USERNAME=$DB_USERNAME \
+            -e SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD \
+            serviciudad:stable
+          
+          # Iniciar versión Canary
+          echo "🔧 Iniciando Canary..."
+          docker run -d \
+            --name serviciudad-canary \
+            -p 8081:8080 \
+            -e SPRING_PROFILES_ACTIVE=production \
+            -e SPRING_DATASOURCE_URL=$DB_URL \
+            -e SPRING_DATASOURCE_USERNAME=$DB_USERNAME \
+            -e SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD \
+            serviciudad:latest
           
           echo "⏳ Esperando 30 segundos para que los servicios estén saludables..."
           sleep 30
@@ -295,8 +286,17 @@ jobs:
           echo "✅ Versión promocionada exitosamente"
           
           # Actualizar el contenedor stable
-          cd deployment
-          docker-compose -f docker-compose.canary.yml up -d app-stable
+          echo "🔄 Actualizando contenedor Stable..."
+          docker stop serviciudad-stable || true
+          docker rm serviciudad-stable || true
+          docker run -d \
+            --name serviciudad-stable \
+            -p 8080:8080 \
+            -e SPRING_PROFILES_ACTIVE=production \
+            -e SPRING_DATASOURCE_URL=${{ secrets.DB_SERVICIUDAD_URL }} \
+            -e SPRING_DATASOURCE_USERNAME=${{ secrets.DB_SERVICIUDAD_USERNAME }} \
+            -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_SERVICIUDAD_PASSWORD }} \
+            serviciudad:stable
           echo "✅ Contenedor stable actualizado"
 
       - name: Verify promotion
@@ -322,8 +322,8 @@ jobs:
       - name: Automatic Rollback
         run: |
           echo "🔄 Ejecutando rollback automático..."
-          cd deployment
-          docker-compose -f docker-compose.canary.yml stop app-canary || true
+          docker stop serviciudad-canary || true
+          docker rm serviciudad-canary || true
           echo "✅ Rollback completado - Canary detenido, Stable sigue funcionando"
 
   cleanup:
@@ -336,15 +336,6 @@ jobs:
       - name: Clean up containers
         run: |
           echo "🧹 Limpiando contenedores..."
-          cd deployment
-          docker-compose -f docker-compose.canary.yml down || true
+          docker stop serviciudad-stable serviciudad-canary || true
+          docker rm serviciudad-stable serviciudad-canary || true
           echo "✅ Limpieza completada"
-
-      - name: Upload deployment logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: deployment-logs
-          path: |
-            deployment/
-          retention-days: 1
