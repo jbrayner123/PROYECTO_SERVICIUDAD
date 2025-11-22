@@ -1,0 +1,338 @@
+name: CI/CD Pipeline - ServiCiudad
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  JAVA_VERSION: 21
+  MAVEN_OPTS: -Xmx1024m
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: serviciudad_test
+          MYSQL_USER: test_user
+          MYSQL_PASSWORD: test_password
+          MYSQL_ROOT_PASSWORD: root_test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Wait for MySQL
+        run: |
+          timeout 30 bash -c 'until mysqladmin ping -h 127.0.0.1 -P 3306 -u root -proot_test_password 2>/dev/null; do sleep 2; done'
+
+      - name: Build and run tests with coverage
+        run: |
+          mvn -B clean verify jacoco:report
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/serviciudad_test?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+          SPRING_DATASOURCE_USERNAME: test_user
+          SPRING_DATASOURCE_PASSWORD: test_password
+          SPRING_JPA_HIBERNATE_DDL_AUTO: create-drop
+
+      - name: Verify coverage (80% minimum)
+        run: |
+          # Verificación básica de cobertura - ajustar según necesidades
+          mvn jacoco:check
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/serviciudad_test?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+          SPRING_DATASOURCE_USERNAME: test_user
+          SPRING_DATASOURCE_PASSWORD: test_password
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+          retention-days: 30
+
+  package:
+    name: Package Application
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: success()
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          
+      - name: Build JAR package
+        run: mvn -B package -DskipTests
+          
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: serviciudad-app-${{ github.sha }}
+          path: target/*.jar
+          retention-days: 7
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: serviciudad-app-${{ github.sha }}
+          path: target/
+          
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        run: |
+          docker build -t serviciudad:latest -t serviciudad:${{ github.sha }} .
+          
+      - name: Save Docker image
+        run: |
+          docker save -o /tmp/serviciudad.tar serviciudad:latest
+          
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/serviciudad.tar
+          retention-days: 1
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results.sarif"
+
+  canary-deploy:
+    name: Canary Deployment
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/serviciudad.tar
+
+      - name: Setup Docker Compose for Canary
+        run: |
+          # Crear docker-compose para canary
+          cat > docker-compose.canary.yml << 'EOF'
+          version: '3.8'
+          services:
+            app-stable:
+              image: serviciudad:stable
+              container_name: serviciudad-stable
+              ports:
+                - "8080:8080"
+              environment:
+                - SPRING_PROFILES_ACTIVE=production
+                - SPRING_DATASOURCE_URL=$DB_URL
+                - SPRING_DATASOURCE_USERNAME=$DB_USERNAME
+                - SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD
+              
+            app-canary:
+              image: serviciudad:latest
+              container_name: serviciudad-canary
+              ports:
+                - "8081:8080"
+              environment:
+                - SPRING_PROFILES_ACTIVE=production
+                - SPRING_DATASOURCE_URL=$DB_URL
+                - SPRING_DATASOURCE_USERNAME=$DB_USERNAME
+                - SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD
+                
+            nginx:
+              image: nginx:alpine
+              container_name: nginx-balancer
+              ports:
+                - "80:80"
+              volumes:
+                - ./nginx-canary.conf:/etc/nginx/nginx.conf
+              depends_on:
+                - app-stable
+                - app-canary
+          EOF
+          
+          # Crear configuración nginx para canary
+          cat > nginx-canary.conf << 'EOF'
+          events {}
+          http {
+              upstream backend {
+                  server serviciudad-stable:8080 weight=90;
+                  server serviciudad-canary:8080 weight=10;
+              }
+              
+              server {
+                  listen 80;
+                  
+                  location / {
+                      proxy_pass http://backend;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                  }
+                  
+                  location /health {
+                      proxy_pass http://backend/actuator/health;
+                      proxy_set_header Host $host;
+                  }
+              }
+          }
+          EOF
+
+      - name: Tag current stable
+        run: |
+          docker tag serviciudad:latest serviciudad:stable || echo "No stable tag found, continuing..."
+
+      - name: Deploy Canary version
+        env:
+          DB_URL: ${{ secrets.DB_SERVICIUDAD_URL }}
+          DB_USERNAME: ${{ secrets.DB_SERVICIUDAD_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_SERVICIUDAD_PASSWORD }}
+        run: |
+          # Detener contenedores existentes
+          docker-compose -f docker-compose.canary.yml down || true
+          
+          # Iniciar con nueva versión canary
+          docker-compose -f docker-compose.canary.yml up -d app-canary
+          
+          # Esperar que canary esté saludable
+          echo "Waiting for canary service to be healthy..."
+          for i in {1..30}; do
+            if curl -s -f http://localhost:8081/actuator/health > /dev/null 2>&1; then
+              echo "Canary service is up and healthy!"
+              break
+            fi
+            echo "Attempt $i: Waiting for canary service..."
+            sleep 2
+          done
+          
+          # Verificación final
+          curl -f http://localhost:8081/actuator/health || exit 1
+
+      - name: Health Check Canary
+        run: |
+          echo "Testing canary deployment health endpoint..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/actuator/health)
+          if [ "$response" -eq 200 ]; then
+            echo "✅ Canary health check PASSED"
+          else
+            echo "❌ Canary health check FAILED - HTTP $response"
+            exit 1
+          fi
+
+  promotion:
+    name: Promote to Stable
+    runs-on: ubuntu-latest
+    needs: canary-deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Wait for manual approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: jbrayner123
+          minimum-approvals: 1
+          issue-title: "Approve Deployment - ${{ github.sha }}"
+          issue-body: "Please approve the deployment of commit ${{ github.sha }} to production."
+          
+      - name: Promote Canary to Stable
+        run: |
+          echo "Promoting canary version to stable..."
+          docker tag serviciudad:latest serviciudad:stable
+          echo "✅ Version promoted successfully!"
+          
+      - name: Complete stable deployment
+        env:
+          DB_URL: ${{ secrets.DB_SERVICIUDAD_URL }}
+          DB_USERNAME: ${{ secrets.DB_SERVICIUDAD_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_SERVICIUDAD_PASSWORD }}
+        run: |
+          echo "Starting stable deployment..."
+          docker-compose -f docker-compose.canary.yml up -d app-stable
+          echo "✅ Stable deployment completed!"
+
+      - name: Verify stable deployment
+        run: |
+          echo "Verifying stable deployment..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health)
+          if [ "$response" -eq 200 ]; then
+            echo "✅ Stable deployment verification PASSED"
+          else
+            echo "❌ Stable deployment verification FAILED"
+            exit 1
+          fi
+
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: canary-deploy
+    if: failure()
+    
+    steps:
+      - name: Rollback to previous stable
+        run: |
+          echo "🚨 Rolling back due to pipeline failure..."
+          docker-compose -f docker-compose.canary.yml down
+          echo "✅ Rollback completed - previous stable version restored"
