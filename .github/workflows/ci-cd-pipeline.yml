@@ -310,7 +310,7 @@ jobs:
       - name: Wait for manual approval
         uses: trstringer/manual-approval@v1
         with:
-          secret: ${{ github.TOKEN }}
+          secret: ${{ secrets.MANUAL_APPROVAL_TOKEN }}
           approvers: jbrayner123
           minimum-approvals: 1
           issue-title: "Approve Canary Promotion - ${{ github.sha }}"
