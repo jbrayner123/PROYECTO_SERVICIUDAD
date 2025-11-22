@@ -164,11 +164,9 @@ jobs:
         run: |
           echo "🚀 Desplegando versión Canary..."
           
-          # Detener contenedores existentes
-          docker stop serviciudad-stable || true
-          docker stop serviciudad-canary || true
-          docker rm serviciudad-stable || true
-          docker rm serviciudad-canary || true
+          # Detener contenedores existentes (ignorar errores si no existen)
+          docker stop serviciudad-stable serviciudad-canary 2>/dev/null || true
+          docker rm serviciudad-stable serviciudad-canary 2>/dev/null || true
           
           # Iniciar versión Stable
           echo "🔧 Iniciando Stable..."
@@ -192,26 +190,56 @@ jobs:
             -e SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD \
             serviciudad:latest
           
-          echo "⏳ Esperando 30 segundos para que los servicios estén saludables..."
-          sleep 30
+          echo "⏳ Esperando que los servicios inicien (esto puede tomar hasta 60 segundos)..."
           
-          echo "🏥 Verificando salud de los servicios..."
+          # Función mejorada para verificar salud con reintentos
+          check_service_health() {
+            local port=$1
+            local service_name=$2
+            local max_attempts=30
+            local attempt=1
+            
+            echo "🔍 Verificando $service_name en puerto $port..."
+            
+            while [ $attempt -le $max_attempts ]; do
+              # Verificar si el contenedor está corriendo
+              if ! docker ps | grep -q "serviciudad-${service_name,,}"; then
+                echo "❌ Intento $attempt: Contenedor $service_name no está corriendo"
+                docker logs "serviciudad-${service_name,,}" --tail 10
+                return 1
+              fi
+              
+              # Verificar health endpoint
+              if curl -s -f "http://localhost:$port/actuator/health" > /dev/null 2>&1; then
+                echo "✅ $service_name está saludable (intento $attempt)"
+                return 0
+              else
+                echo "⏳ Intento $attempt/$max_attempts: $service_name aún no responde, esperando 2 segundos..."
+                sleep 2
+                attempt=$((attempt + 1))
+              fi
+            done
+            
+            echo "❌ $service_name no está saludable después de $max_attempts intentos"
+            docker logs "serviciudad-${service_name,,}" --tail 20
+            return 1
+          }
           
           # Verificar Stable
-          if curl -s -f http://localhost:8080/actuator/health > /dev/null; then
-            echo "✅ Stable está saludable"
+          if check_service_health 8080 "stable"; then
+            echo "🎉 Stable desplegado exitosamente"
             STABLE_HEALTH=200
           else
-            echo "❌ Stable no responde"
+            echo "❌ Falló el despliegue de Stable"
             STABLE_HEALTH=000
           fi
           
-          # Verificar Canary  
-          if curl -s -f http://localhost:8081/actuator/health > /dev/null; then
-            echo "✅ Canary está saludable"
+          # Verificar Canary
+          if check_service_health 8081 "canary"; then
+            echo "🎉 Canary desplegado exitosamente"
             CANARY_HEALTH=200
           else
-            echo "❌ Canary no responde"
+            echo "❌ Falló el despliegue de Canary"
             CANARY_HEALTH=000
           fi
           
@@ -219,8 +247,21 @@ jobs:
           if [ "$STABLE_HEALTH" -eq 200 ] && [ "$CANARY_HEALTH" -eq 200 ]; then
             echo "🎉 ¡Despliegue Canary exitoso!"
             echo "📊 Ambos servicios están funcionando correctamente"
+            
+            # Mostrar información final
+            echo ""
+            echo "🌐 URLs de los servicios:"
+            echo "   - Stable: http://localhost:8080/actuator/health"
+            echo "   - Canary: http://localhost:8081/actuator/health"
+            echo ""
+            echo "⏰ Tiempo de inicio completado"
           else
             echo "❌ Error en el despliegue Canary"
+            echo "📋 Mostrando logs de diagnóstico:"
+            echo "=== Logs de Stable ==="
+            docker logs serviciudad-stable --tail 30
+            echo "=== Logs de Canary ==="
+            docker logs serviciudad-canary --tail 30
             exit 1
           fi
 
@@ -231,27 +272,35 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-      - name: Run health checks against both versions
+      - name: Run comprehensive health checks
         run: |
-          echo "🧪 Ejecutando health checks..."
+          echo "🧪 Ejecutando verificaciones completas..."
+          
+          # Verificar que ambos servicios estén corriendo
+          echo "🔍 Verificando contenedores..."
+          docker ps --filter "name=serviciudad"
           
           # Probar Stable
           echo "🔍 Probando Stable..."
-          STABLE_RESPONSE=$(curl -s http://localhost:8080/actuator/health)
-          echo "Stable: $STABLE_RESPONSE"
+          if curl -s -f http://localhost:8080/actuator/health > /dev/null; then
+            STABLE_RESPONSE=$(curl -s http://localhost:8080/actuator/health)
+            echo "✅ Stable: $STABLE_RESPONSE"
+          else
+            echo "❌ Stable no responde"
+            exit 1
+          fi
           
           # Probar Canary
           echo "🔍 Probando Canary..."
-          CANARY_RESPONSE=$(curl -s http://localhost:8081/actuator/health)
-          echo "Canary: $CANARY_RESPONSE"
-          
-          # Verificar que ambos responden
-          if [[ "$STABLE_RESPONSE" == *"UP"* ]] && [[ "$CANARY_RESPONSE" == *"UP"* ]]; then
-            echo "✅ Health checks exitosos para ambas versiones"
+          if curl -s -f http://localhost:8081/actuator/health > /dev/null; then
+            CANARY_RESPONSE=$(curl -s http://localhost:8081/actuator/health)
+            echo "✅ Canary: $CANARY_RESPONSE"
           else
-            echo "❌ Health checks fallaron"
+            echo "❌ Canary no responde"
             exit 1
           fi
+          
+          echo "🎉 Todas las verificaciones pasaron exitosamente"
 
   promote:
     name: Promote to Stable
@@ -271,9 +320,8 @@ jobs:
             Please approve promoting the canary version to stable.
             
             **Commit:** ${{ github.sha }}
-            **Changes:** ${{ github.event.head_commit.message }}
             
-            Both versions are currently running:
+            Both versions are currently running and healthy:
             - Stable: http://localhost:8080/actuator/health
             - Canary: http://localhost:8081/actuator/health
             
@@ -284,27 +332,12 @@ jobs:
           echo "🎉 Promocionando Canary a Stable..."
           docker tag serviciudad:latest serviciudad:stable
           echo "✅ Versión promocionada exitosamente"
-          
-          # Actualizar el contenedor stable
-          echo "🔄 Actualizando contenedor Stable..."
-          docker stop serviciudad-stable || true
-          docker rm serviciudad-stable || true
-          docker run -d \
-            --name serviciudad-stable \
-            -p 8080:8080 \
-            -e SPRING_PROFILES_ACTIVE=production \
-            -e SPRING_DATASOURCE_URL=${{ secrets.DB_SERVICIUDAD_URL }} \
-            -e SPRING_DATASOURCE_USERNAME=${{ secrets.DB_SERVICIUDAD_USERNAME }} \
-            -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_SERVICIUDAD_PASSWORD }} \
-            serviciudad:stable
-          echo "✅ Contenedor stable actualizado"
 
       - name: Verify promotion
         run: |
-          echo "🔍 Verificando promoción..."
-          sleep 10
+          echo "🔍 Verificando que Stable sigue funcionando..."
+          sleep 5
           
-          # Verificar que stable sigue funcionando
           if curl -s -f http://localhost:8080/actuator/health > /dev/null; then
             echo "✅ Stable sigue funcionando después de la promoción"
           else
@@ -322,20 +355,24 @@ jobs:
       - name: Automatic Rollback
         run: |
           echo "🔄 Ejecutando rollback automático..."
-          docker stop serviciudad-canary || true
-          docker rm serviciudad-canary || true
+          docker stop serviciudad-canary 2>/dev/null || true
+          docker rm serviciudad-canary 2>/dev/null || true
           echo "✅ Rollback completado - Canary detenido, Stable sigue funcionando"
 
   cleanup:
     name: Cleanup
     runs-on: ubuntu-latest
-    needs: promote
     if: always()
     
     steps:
-      - name: Clean up containers
+      - name: Clean up containers and images
         run: |
-          echo "🧹 Limpiando contenedores..."
-          docker stop serviciudad-stable serviciudad-canary || true
-          docker rm serviciudad-stable serviciudad-canary || true
+          echo "🧹 Limpiando recursos..."
+          # Limpiar contenedores
+          docker stop serviciudad-stable serviciudad-canary 2>/dev/null || true
+          docker rm serviciudad-stable serviciudad-canary 2>/dev/null || true
+          
+          # Limpiar imágenes temporales
+          docker rmi serviciudad:latest serviciudad:${{ github.sha }} 2>/dev/null || true
+          
           echo "✅ Limpieza completada"
