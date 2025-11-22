@@ -92,10 +92,17 @@ jobs:
       - name: Build JAR package
         run: mvn -B package -DskipTests
           
+      - name: Display JAR info
+        run: |
+          echo "📦 Archivos JAR generados:"
+          ls -la target/*.jar
+          echo "🔍 Detalles del JAR:"
+          ls -la target/ | grep .jar
+          
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: serviciudad-app-${{ github.sha }}
+          name: serviciudad-app
           path: target/*.jar
           retention-days: 7
 
@@ -111,7 +118,7 @@ jobs:
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
-          name: serviciudad-app-${{ github.sha }}
+          name: serviciudad-app
           path: target/
           
       - name: Set up Docker Buildx
@@ -343,11 +350,32 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: serviciudad-app
+          path: target/
+          
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        run: |
+          docker build -t serviciudad:${{ github.sha }} .
+          docker tag serviciudad:${{ github.sha }} serviciudad:latest
+          docker tag serviciudad:latest serviciudad:stable
+          
+      - name: Verify images
+        run: |
+          echo "📋 Imágenes disponibles:"
+          docker images | grep serviciudad
+          
       - name: Promote Canary to Stable
         run: |
           echo "🎉 Promocionando Canary a Stable..."
-          docker tag serviciudad:latest serviciudad:stable
-          echo "✅ Versión promocionada exitosamente"
+          echo "✅ Versión ${{ github.sha }} promocionada a stable"
           
           echo ""
           echo "🎊 ¡PIPELINE COMPLETADO EXITOSAMENTE!"
