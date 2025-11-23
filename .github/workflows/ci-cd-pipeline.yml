@@ -313,40 +313,12 @@ jobs:
           echo ""
           echo "✅ Pruebas de conectividad completadas"
 
-  # APPROVAL SIMPLIFICADO - Sin creación de issues
-  wait-for-approval:
-    name: Wait for Manual Approval
-    runs-on: ubuntu-latest
-    needs: canary-test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Manual Approval Required
-        run: |
-          echo "⏳ ESPERA: Aprobación manual requerida para continuar..."
-          echo ""
-          echo "📋 RESUMEN del despliegue Canary:"
-          echo "✅ Build y pruebas completadas"
-          echo "✅ Imagen Docker construida"
-          echo "✅ Despliegue Canary ejecutado"
-          echo "✅ Pruebas de conectividad pasadas"
-          echo ""
-          echo "🚀 Para CONTINUAR con la promoción a Stable:"
-          echo "1. Revisa que todo esté correcto"
-          echo "2. Ejecuta manualmente el job 'Promote to Stable'"
-          echo "3. O espera 30 segundos para continuar automáticamente (en este demo)"
-          echo ""
-          echo "🛑 Para CANCELAR: Cancela este workflow"
-          
-          # En un entorno real aquí esperarías aprobación manual
-          # Para este demo, continuamos después de 30 segundos
-          sleep 30
-          echo "✅ Continuando con promoción (modo demo)..."
-          
+
   promote:
     name: Promote to Stable
     runs-on: ubuntu-latest
-    needs: wait-for-approval
+    environment: canary-approval
+    needs: canary-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:

@@ -20,4 +20,5 @@ public class DeudaController {
         DeudaConsolidadaDTO dto = obtenerDeudaUseCase.obtenerDeuda(clienteId);
         return ResponseEntity.ok(dto);
     }
+
 }
