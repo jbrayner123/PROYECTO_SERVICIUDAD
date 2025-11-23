@@ -85,6 +85,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          command_timeout: 30m
           script: |
             echo "🚀 Iniciando despliegue Canary en AWS..."
             
@@ -127,6 +128,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          command_timeout: 30m
           script: |
             echo "🏥 Verificando salud de los servicios..."
             sleep 15 # Esperar a que Spring Boot arranque
@@ -163,6 +165,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          command_timeout: 30m
           script: |
             echo "🎉 Promocionando Canary a Stable..."
             
