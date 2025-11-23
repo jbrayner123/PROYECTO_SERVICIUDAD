@@ -113,6 +113,7 @@
 							<goal>report</goal>
 						</goals>
 					</execution>
+
 					<execution>
 						<id>check</id>
 						<phase>verify</phase>
@@ -134,6 +135,7 @@
 							</rules>
 						</configuration>
 					</execution>
+
 				</executions>
 			</plugin>
 		</plugins>
