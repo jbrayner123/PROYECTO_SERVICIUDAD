@@ -8,9 +8,7 @@ on:
 
 env:
   JAVA_VERSION: 17
-  MAVEN_OPTS: -Xmx1024m
 
-# PERMISOS GLOBALES para todo el workflow
 permissions:
   contents: read
   issues: write
@@ -18,7 +16,7 @@ permissions:
 
 jobs:
   build-test:
-    name: Build & Test
+    name: Build & Test (CI)
     runs-on: ubuntu-latest
     
     services:
@@ -73,246 +71,82 @@ jobs:
             target/site/jacoco/
           retention-days: 30
 
-  package:
-    name: Package Application
+  canary-deploy:
+    name: Deploy Canary to AWS
     runs-on: ubuntu-latest
     needs: build-test
-    if: success()
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: maven
-          
-      - name: Build JAR package
-        run: mvn -B package -DskipTests
-          
-      - name: Display JAR info
-        run: |
-          echo "📦 Archivos JAR generados:"
-          ls -la target/*.jar
-          echo "🔍 Detalles del JAR:"
-          ls -la target/ | grep .jar
-          
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: serviciudad-app
-          path: target/*.jar
-          retention-days: 7
-
-  docker-build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: package
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Download JAR artifact
-        uses: actions/download-artifact@v4
+      - name: Deploy Canary via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          name: serviciudad-app
-          path: target/
-          
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        
-      - name: Build Docker image
-        run: |
-          docker build -t serviciudad:${{ github.sha }} .
-          docker tag serviciudad:${{ github.sha }} serviciudad:latest
-          
-      - name: Save Docker image
-        run: |
-          docker save -o /tmp/serviciudad.tar serviciudad:latest serviciudad:${{ github.sha }}
-          
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image
-          path: /tmp/serviciudad.tar
-          retention-days: 1
-
-  canary-deploy:
-    name: Canary Deployment
-    runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Docker image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-          path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/serviciudad.tar
-
-      - name: Initialize stable tag if missing
-        run: |
-          if ! docker inspect serviciudad:stable >/dev/null 2>&1; then
-            echo "🔄 Creando tag stable inicial..."
-            docker tag serviciudad:latest serviciudad:stable
-          fi
-
-      - name: Deploy Canary version
-        env:
-          DB_URL: ${{ secrets.DB_SERVICIUDAD_URL }}
-          DB_USERNAME: ${{ secrets.DB_SERVICIUDAD_USERNAME }}
-          DB_PASSWORD: ${{ secrets.DB_SERVICIUDAD_PASSWORD }}
-        run: |
-          echo "🚀 Desplegando versión Canary..."
-          
-          # Detener contenedores existentes
-          docker stop serviciudad-stable serviciudad-canary 2>/dev/null || true
-          docker rm serviciudad-stable serviciudad-canary 2>/dev/null || true
-          
-          # Iniciar versión Stable
-          echo "🔧 Iniciando Stable..."
-          docker run -d \
-            --name serviciudad-stable \
-            -p 8080:8080 \
-            -e SPRING_PROFILES_ACTIVE=production \
-            -e SPRING_DATASOURCE_URL=$DB_URL \
-            -e SPRING_DATASOURCE_USERNAME=$DB_USERNAME \
-            -e SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD \
-            serviciudad:stable
-          
-          # Iniciar versión Canary
-          echo "🔧 Iniciando Canary..."
-          docker run -d \
-            --name serviciudad-canary \
-            -p 8081:8080 \
-            -e SPRING_PROFILES_ACTIVE=production \
-            -e SPRING_DATASOURCE_URL=$DB_URL \
-            -e SPRING_DATASOURCE_USERNAME=$DB_USERNAME \
-            -e SPRING_DATASOURCE_PASSWORD=$DB_PASSWORD \
-            serviciudad:latest
-          
-          echo "⏳ Esperando 15 segundos para que Spring Boot inicie..."
-          sleep 15
-          
-          echo "🏥 Verificando salud de los servicios con TUS endpoints reales..."
-          
-          # Función para verificar salud con TUS endpoints específicos
-          check_service_health() {
-            local port=$1
-            local service_name=$2
-            local max_attempts=15
-            local attempt=1
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "🚀 Iniciando despliegue Canary en AWS..."
             
-            echo "🔍 Verificando $service_name en puerto $port..."
+            # 1. Actualizar código
+            cd PROYECTO_SERVICIUDAD
+            git fetch --all
+            git reset --hard origin/main
             
-            while [ $attempt -le $max_attempts ]; do
-              # Verificar si el contenedor está corriendo
-              if ! docker ps | grep -q "serviciudad-${service_name,,}"; then
-                echo "❌ Contenedor $service_name no está corriendo"
-                return 1
-              fi
+            # 2. Construir nueva imagen
+            echo "🔨 Construyendo imagen Docker..."
+            docker build -t serviciudad:latest .
+            
+            # 3. Reiniciar Canary (Puerto 8081)
+            echo "🔄 Reiniciando contenedor Canary..."
+            docker stop serviciudad-canary || true
+            docker rm serviciudad-canary || true
+            
+            docker run -d \
+              --name serviciudad-canary \
+              -p 8081:8080 \
+              -e SPRING_PROFILES_ACTIVE=production \
+              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cnse4eayeaej.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
+              -e SPRING_DATASOURCE_USERNAME='admin' \
+              -e SPRING_DATASOURCE_PASSWORD='soyeladmin123' \
+              serviciudad:latest
               
-              # Probar endpoints específicos de TU aplicación
-              # PRIMERO: El endpoint raíz que debería existir en Spring Boot
-              if curl -s -f "http://localhost:$port/" > /dev/null 2>&1; then
-                echo "✅ $service_name está saludable (endpoint: /) - intento $attempt"
-                return 0
-              # SEGUNDO: El endpoint de tu API específico
-              elif curl -s "http://localhost:$port/api/v1/clientes/test/deuda-consolidada" > /dev/null 2>&1; then
-                echo "✅ $service_name está saludable (endpoint: /api/v1/clientes/test/deuda-consolidada) - intento $attempt"
-                return 0
-              else
-                echo "⏳ Intento $attempt/$max_attempts: $service_name iniciando, esperando 3 segundos..."
-                sleep 3
-                attempt=$((attempt + 1))
-              fi
-            done
-            
-            echo "❌ $service_name no responde después de $max_attempts intentos"
-            echo "📋 Últimos logs:"
-            docker logs "serviciudad-${service_name,,}" --tail 5
-            return 1
-          }
-          
-          # Verificar Stable
-          if check_service_health 8080 "stable"; then
-            echo "🎉 Stable desplegado exitosamente"
-            STABLE_HEALTH=200
-          else
-            echo "⚠️  Stable tiene problemas de conectividad"
-            STABLE_HEALTH=000
-          fi
-          
-          # Verificar Canary
-          if check_service_health 8081 "canary"; then
-            echo "🎉 Canary desplegado exitosamente"
-            CANARY_HEALTH=200
-          else
-            echo "⚠️  Canary tiene problemas de conectividad"
-            CANARY_HEALTH=000
-          fi
-          
-          # Verificación final - MÁS TOLERANTE
-          if [ "$STABLE_HEALTH" -eq 200 ] || [ "$CANARY_HEALTH" -eq 200 ]; then
-            echo "🎉 ¡DESPLIEGUE CANARY EXITOSO!"
-            echo "📊 Resumen:"
-            echo "   - Stable: $([ "$STABLE_HEALTH" -eq 200 ] && echo "✅" || echo "⚠️")"
-            echo "   - Canary: $([ "$CANARY_HEALTH" -eq 200 ] && echo "✅" || echo "⚠️")"
-            echo ""
-            echo "🌐 Endpoints disponibles:"
-            if [ "$STABLE_HEALTH" -eq 200 ]; then
-              echo "   - Stable: http://localhost:8080/api/v1/clientes/{id}/deuda-consolidada"
-            fi
-            if [ "$CANARY_HEALTH" -eq 200 ]; then
-              echo "   - Canary: http://localhost:8081/api/v1/clientes/{id}/deuda-consolidada"
-            fi
-          else
-            echo "❌ Error crítico - ningún servicio responde"
-            echo "📋 Mostrando logs completos:"
-            docker logs serviciudad-stable
-            docker logs serviciudad-canary
-            exit 1
-          fi
+            echo "✅ Canary desplegado en puerto 8081"
 
   canary-test:
-    name: Test Canary Version
+    name: Verify Canary Health
     runs-on: ubuntu-latest
     needs: canary-deploy
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-      - name: Test real endpoints
-        run: |
-          echo "🧪 Probando endpoints reales de la aplicación..."
-          
-          echo "🔍 Verificando contenedores:"
-          docker ps --filter "name=serviciudad"
-          
-          echo ""
-          echo "🔍 Probando Stable (8080):"
-          echo " - Endpoint raíz:"
-          curl -s http://localhost:8080/ || echo "No hay endpoint raíz"
-          echo " - API de deudas:"
-          curl -s http://localhost:8080/api/v1/clientes/test/deuda-consolidada || echo "API no responde (puede ser normal sin datos)"
-          
-          echo ""
-          echo "🔍 Probando Canary (8081):"
-          echo " - Endpoint raíz:"
-          curl -s http://localhost:8081/ || echo "No hay endpoint raíz"
-          echo " - API de deudas:"
-          curl -s http://localhost:8081/api/v1/clientes/test/deuda-consolidada || echo "API no responde (puede ser normal sin datos)"
-          
-          echo ""
-          echo "✅ Pruebas de conectividad completadas"
-
+      - name: Check Health via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "🏥 Verificando salud de los servicios..."
+            sleep 15 # Esperar a que Spring Boot arranque
+            
+            # Verificar Stable (Debe seguir vivo)
+            echo "🔍 Verificando Stable (8080)..."
+            if curl -s -f "http://localhost:8080/api/v1/clientes/0001234567/deuda-consolidada" > /dev/null; then
+              echo "✅ Stable OK"
+            else
+              echo "⚠️ Stable no responde (puede ser normal si es el primer despliegue)"
+            fi
+            
+            # Verificar Canary (Debe estar vivo y con nueva versión)
+            echo "🔍 Verificando Canary (8081)..."
+            if curl -s -f "http://localhost:8081/api/v1/clientes/0001234567/deuda-consolidada" > /dev/null; then
+              echo "✅ Canary OK"
+            else
+              echo "❌ Canary falló"
+              exit 1
+            fi
 
   promote:
     name: Promote to Stable
@@ -322,51 +156,31 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Download JAR artifact
-        uses: actions/download-artifact@v4
+      - name: Promote via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          name: serviciudad-app
-          path: target/
-          
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        
-      - name: Build Docker image
-        run: |
-          docker build -t serviciudad:${{ github.sha }} .
-          docker tag serviciudad:${{ github.sha }} serviciudad:latest
-          docker tag serviciudad:latest serviciudad:stable
-          
-      - name: Verify images
-        run: |
-          echo "📋 Imágenes disponibles:"
-          docker images | grep serviciudad
-          
-      - name: Promote Canary to Stable
-        run: |
-          echo "🎉 Promocionando Canary a Stable..."
-          echo "✅ Versión ${{ github.sha }} promocionada a stable"
-          
-          echo ""
-          echo "🎊 ¡PIPELINE COMPLETADO EXITOSAMENTE!"
-          echo "======================================"
-          echo "✅ Todas las etapas del CI/CD completadas"
-          echo "✅ Estrategia Canary demostrada"
-          echo "✅ Health checks implementados"
-          echo "✅ Aprobación manual simulada"
-          echo "✅ Promoción a Stable ejecutada"
-
-  cleanup:
-    name: Cleanup
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-      - name: Clean up containers
-        run: |
-          echo "🧹 Limpiando contenedores..."
-          docker stop serviciudad-stable serviciudad-canary 2>/dev/null || true
-          docker rm serviciudad-stable serviciudad-canary 2>/dev/null || true
-          echo "✅ Limpieza completada"
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "🎉 Promocionando Canary a Stable..."
+            
+            # 1. Etiquetar imagen probada como stable
+            docker tag serviciudad:latest serviciudad:stable
+            
+            # 2. Reiniciar Stable (Puerto 8080) con la nueva imagen
+            echo "🔄 Actualizando contenedor Stable..."
+            docker stop serviciudad-stable || true
+            docker rm serviciudad-stable || true
+            
+            docker run -d \
+              --name serviciudad-stable \
+              -p 8080:8080 \
+              -e SPRING_PROFILES_ACTIVE=production \
+              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cnse4eayeaej.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
+              -e SPRING_DATASOURCE_USERNAME='admin' \
+              -e SPRING_DATASOURCE_PASSWORD='soyeladmin123' \
+              serviciudad:stable
+              
+            echo "✅ Despliegue completado. Ambas versiones están sincronizadas."

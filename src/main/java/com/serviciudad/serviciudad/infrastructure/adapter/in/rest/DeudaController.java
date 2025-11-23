@@ -21,4 +21,8 @@ public class DeudaController {
         return ResponseEntity.ok(dto);
     }
 
+    @GetMapping("/version")
+    public String getVersion() {
+        return "¡Hola! Soy la Versión CANARY (Nueva) en AWS ☁️";
+    }
 }
