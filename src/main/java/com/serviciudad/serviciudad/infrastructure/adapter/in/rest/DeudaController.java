@@ -20,5 +20,10 @@ public class DeudaController {
         DeudaConsolidadaDTO dto = obtenerDeudaUseCase.obtenerDeuda(clienteId);
         return ResponseEntity.ok(dto);
     }
+    @GetMapping("/version")
+    public String getVersion() {
+        return "¡Hola! Soy la Versión CANARY (Nueva) en AWS ☁️";
+    }
+
 
 }
