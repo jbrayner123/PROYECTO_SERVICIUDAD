@@ -107,7 +107,7 @@ jobs:
               --name serviciudad-canary \
               -p 8081:8080 \
               -e SPRING_PROFILES_ACTIVE=production \
-              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cnse4eayeaej.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
+              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cvmwk06wg5sd.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
               -e SPRING_DATASOURCE_USERNAME='admin' \
               -e SPRING_DATASOURCE_PASSWORD='soyeladmin123' \
               serviciudad:latest
@@ -181,7 +181,7 @@ jobs:
               --name serviciudad-stable \
               -p 8080:8080 \
               -e SPRING_PROFILES_ACTIVE=production \
-              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cnse4eayeaej.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
+              -e SPRING_DATASOURCE_URL='jdbc:mysql://database-1.cvmwk06wg5sd.us-east-2.rds.amazonaws.com:3306/serviciudad_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true' \
               -e SPRING_DATASOURCE_USERNAME='admin' \
               -e SPRING_DATASOURCE_PASSWORD='soyeladmin123' \
               serviciudad:stable
